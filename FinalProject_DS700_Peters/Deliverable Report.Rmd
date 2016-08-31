@@ -1,0 +1,197 @@
+---
+title: "Fargo Health Group Deliverable Report"
+subtitle: "Abbeville Health Center Time Series Analysis"
+author: "Tyler Peters"
+date: "August 19, 2016"
+output: word_document
+fontsize: 12pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	fig.height = 3,
+	fig.width = 6
+)
+# import all needed libraries
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(zoo)
+library(mice) # load the mice() package
+library(VIM)
+library(forecast)
+library(lattice)
+
+```
+
+# Business Problem
+In order to manage the resources of Fargo Health Group's local offices and health centers, the adoption of a data-driven approach is paramount in order to plan staffing needs, make financially sound decisions, and improve customer satisfaction. The analytic approach utilized herein will consume the historical counts of patient visits to the Abbeville health center for cardiovascular health problems. Given the vast amount of appointment data across all of the health centers, attempts to make insightful, educated predictions in regard to future staffing needs will prove futile. Within this report we compare two forecasting models, and make recommendations according to the better of the two models.
+
+# Data Cleaning Approach
+- Explain the nature and structure of the received data, and how data inconsistencies and issues were resolved.
+
+The data for the Abbeville health center was delivered across multiple sheets within an Excel workbook. The main sheet, which contained unsorted data, contained missing values and erroneous data. The remainer of the data for May 2007 and December 2013, specifically, was spread across several more worksheets with unsorted appointment-level data. In these sheets, there were also inconsistencies with date formatting and the presence of additional, irrelevant data. These latter sheets will need to be cleaned first so the appointment counts may be incorporated into the main spreadsheet for subsequent time series analysis.
+
+## Assumptions
+- In December 2012, the Abbeville health center was closed for the holidays. We take this to assume that there were no appointments scheduled during this month. Since the Abbeville health center did not report closures of this impact historically, this value will be replaced with an imputed value to ensure consistency.
+- Values such as 99999999 will be purged from the data and imputed; it is assumed that these are erroneous values.
+- Non-numeric data will be removed from the dataset and imputed. 
+- Duplicate entries in the December 2013 dataset were removed during the cleansing process, since each entry represents a unique appointment.
+- The data for December 2009 through February 2010 was split evenly amongsy the three months, summing to 5129 appointments as noted in the given information.
+
+Based on the interquartile range computed from the semi-cleaned data (i.e. the data with the obvious outliers and non-numeric data removed), we establish that the number of incoming examinations from October 2013 of 6094 patients is not an outlier (with the exception of 0, any values less than or equal to 6774 were retained in the model). Note that this technique did not detect any outlying data. This can also be visually confirmed by inspecting the boxplot produced from the semi-cleaned data:
+
+```{r semi-clean_boxplot, echo=FALSE, fig.height=1, message=FALSE, warning=FALSE}
+## Data visualizations prior to cleaning (note that non-numeric values were removed prior to import)
+  # import the dirty data into the environment for initial analysis
+  dirty_data <- read_excel("Dataset_original.xlsx", sheet = "preclean")
+  # remove rows with no data
+  dirty_data <- dirty_data %>%
+    filter(!is.na(dirty_data$`Incoming Examinations`))
+  # remove any outliers
+  dirty_data <- dirty_data %>%
+    filter(dirty_data$`Incoming Examinations` < 6774)
+  # create a boxplot
+  ggplot(dirty_data, aes(x = factor(0), y = dirty_data$`Incoming Examinations`)) +
+    geom_boxplot(fill="#3399FF", colour="black") +
+    ggtitle("Incoming examinations for Abbeville HC") +
+    xlab("") +
+    ylab("Incoming Examinations") +
+    scale_x_discrete(breaks = NULL) +
+    coord_flip() 
+```
+
+To illustrate any underlying patterns in the dataset, and examine the data for any other abnormalities, we present a time series plot of the semi-cleaned data, below:
+
+```{r semi-clean_timeseries, echo=FALSE, message=FALSE, warning=FALSE}
+# add a year-month column to the dataframe
+dirty_data <- dirty_data %>%
+  mutate(date = as.Date(paste0(as.character(dirty_data$Month),"/01/",as.character(dirty_data$Year)), format = "%m/%d/%Y"))
+
+# sort the data by year then month
+dirty_data <- dirty_data %>%
+  arrange(Year, Month)
+
+# plot the data as a time series 
+ggplot(dirty_data, aes(date, `Incoming Examinations`)) + 
+  geom_line() +
+  scale_x_date(date_labels = "%Y") +
+  ggtitle("Time versus appointments for Abbeville HC") +
+  xlab("Year") + 
+  ylab("Monthly Appointments")
+```
+
+Be mindful that the boxplot and the time series plot provided above where included to reveal the underlying structure of the data after the removal of glaring outliers, but prior to imputation. Therefore, both plots presented above were filtered to remove any missing data.
+
+Observe that while we have removed all obvious outliers from the data, there remains a datapoint between the years 2008 and 2009 that needs to be properly addressed. To be more precise, this is the number of appointments for October 2008, when the Abbeville health center recorded higer-than-usual appointment volume as a result of the closure of the neighboring New Orleans health center as the result of a hurricane. In order to create the most accurate model possible, we will replace this internal outlier of sorts with an imputed value prior to model fitting. 
+
+After outlying values were removed from the dataset, the data was sorted chronologically and the missing values were imputed using the mice package in R. In this case, our imputation model was linear. We selected a feasible, non-negative set of realistic values from a set of twenty imputed datasets.
+
+Now that the data cleansing is complete, lets take a look at the new time series plot:
+
+```{r clean_timeseries, echo=FALSE, message=FALSE, warning=FALSE}
+# import the actual clean data from its respective spreadsheet
+cleandata <- read_excel("Dataset_cleaned.xlsx", sheet = "Abbeville, LA")
+
+# impute the missing values
+data.impute <- mice(cleandata, m = 20, seed = 150, method = "norm", printFlag = FALSE)
+
+# insert the imputed values into the dataset
+finalData <- complete(data.impute, 7)
+
+# add a year-month column to the dataframe
+finalData <- finalData %>%
+  mutate(date = as.Date(paste0(as.character(finalData$Month),"/01/",as.character(finalData$Year)), format = "%m/%d/%Y"))
+
+# generate the new time series plot of the cleaned data
+ggplot(finalData, aes(date, `Incoming Examinations`)) + 
+  geom_line() +
+  scale_x_date(date_labels = "%Y") +
+  ggtitle("Time versus appointments for Abbeville HC") +
+  xlab("Year") + 
+  ylab("Monthly Appointments")
+```
+
+At this point we have a complete, clean, realistic dataset from which we may conduct our time series analysis.
+
+# Forcasting Models
+In this analysis, we select the ARIMA (autoregressive integrated moving average) and the Holt Winters exponential smoothing models as our primary candidates. These models were selected because they are robust and each present uniqiue strengths and weaknesses.  For instance, the ARIMA model is more sensitive to historical data. Whereas the Holt Winters exponential smoothing model handles trends more accurately and efficiently than the ARIMA model. These unique offerings are clearly visible in the plots produced from each of the models, below:
+
+The code snippet below reveals the definition of the ARIMA model in the R computing language. Note that the weights for the model were calculated automatically.
+
+```{r ARIMA_model, echo=TRUE, message=FALSE, warning=FALSE, fig.height = 4.5}
+# define a ts object for use in the models
+ts.data <- ts(finalData$`Incoming Examinations`, start = c(2006,1), end = c(2013,12), frequency = 12)
+
+## ARIMA model
+  # employ the auto.arima function to find the arima model with the lowest AIC
+  arima.model <- auto.arima(ts.data)
+  
+  # plot the ARIMA model with 12 month forecast
+  plot(forecast(arima.model, level = 0.95, h = 12))
+```
+
+Based on the plots of the residuals below, we conclude that the residuals are approximately normal based on the shape and dispersion of the histogram, and that the variance in the residuals is relatively constant through time. Thus, the model is a good fit to the data.
+
+```{r ARIMA_residuals, echo=FALSE, message=FALSE, warning=FALSE}
+  # plot the residuals for the ARIMA method
+  opar <- par() # capture current graphics settings
+  par(mfrow=c(1,2))
+  hist(residuals(arima.model), xlab = "Residuals", main = "ARIMA Resids")
+  plot(residuals(arima.model), xlab = "Time", ylab = "")
+  par(opar) # reset graphics settings
+```
+
+The code snippet below reveals the definition of the Holt-Winters model in the R.
+
+```{r Holt_model, echo=TRUE, message=FALSE, warning=FALSE, fig.height = 4.5}
+## Holt Winters model
+  # employ the HoltWinters() function
+  holt.model <- HoltWinters(ts.data)
+
+  # plot the Holt Winters model with 12 month forecast
+  plot(forecast.HoltWinters(holt.model, level = 0.95, h = 12)) 
+```
+
+Similar to the conclusion made in regard to the ARIMA model, the residuals are approximately normal based on the shape and dispersion of the histogram, and that the variance in the residuals is relatively constant through time. Thus, the model appears to be a good fit to the data.
+
+```{r Holt_residuals, echo=FALSE, message=FALSE, warning=FALSE}
+  # plot the residuals for the Holt Winters method
+  opar <- par() # capture current graphics settings
+  par(mfrow=c(1,2))
+  hist(residuals(holt.model), xlab = "Residuals", main = "Holt-Winters Resids")
+  plot(residuals(holt.model), xlab = "Time", ylab = "")
+  par(opar) # reset graphics settings
+```
+
+Now that we have established two good models for forecasting the number of appointments for the Abbeville health center for cadiovascular appointments, we now need to determine which of the models to use. In other words, which of the models is better?
+
+## Model Comparison
+In order to compare the models, we use the standard error measurements for each model, where the model with the lowest absolute errors represents the top candidate for driving predictions.
+
+### Error Measures for ARIMA Model
+
+```{r accuracy_arima, echo=FALSE, message=FALSE, warning=FALSE}
+accuracy(arima.model)
+```
+
+### Error Measures for the Holt-Winters Model
+
+```{r accuracy_holtWinters, echo=FALSE, message=FALSE, warning=FALSE}
+accuracy(forecast.HoltWinters(holt.model))
+```
+
+Upon comparison of the error measurements, it is clear that the ARIMA model has lower absolute error than the Holt-Winters model. The recommendations made hereafter are based on the predictions of the ARIMA model.
+
+# Recommendations
+
+
+
+# Lessons Learned
+
+# References
+   
+
